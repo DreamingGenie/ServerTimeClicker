@@ -14,6 +14,9 @@
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <javafx.version>21</javafx.version>
+        <!-- jpackage로 exe 설치파일을 만들 때 필요한 WiX Toolset v3 bin 경로.
+             다른 PC에서 빌드할 경우 -Dwix.bin.dir=... 로 재정의한다. -->
+        <wix.bin.dir>C:\Program Files (x86)\WiX Toolset v3.14\bin</wix.bin.dir>
     </properties>
 
     <dependencies>
@@ -78,4 +81,59 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 사용법: mvn clean package -Pinstaller
+             자바/JavaFX가 설치되지 않은 PC에서도 실행 가능한 EXE 설치파일을
+             target/dist 에 생성한다. Windows에서 exe/msi 생성에는 WiX Toolset v3가 필요하다
+             (https://wixtoolset.org/ 에서 v3.x 설치). -->
+        <profile>
+            <id>installer</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.2.0</version>
+                        <executions>
+                            <execution>
+                                <id>jpackage-exe</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${java.home}/bin/jpackage</executable>
+                                    <environmentVariables>
+                                        <PATH>${wix.bin.dir};${env.PATH}</PATH>
+                                    </environmentVariables>
+                                    <arguments>
+                                        <argument>--type</argument>
+                                        <argument>exe</argument>
+                                        <argument>--input</argument>
+                                        <argument>${project.build.directory}/lib</argument>
+                                        <argument>--dest</argument>
+                                        <argument>${project.build.directory}/dist</argument>
+                                        <argument>--name</argument>
+                                        <argument>NaverMapClicker</argument>
+                                        <argument>--app-version</argument>
+                                        <argument>1.0</argument>
+                                        <argument>--vendor</argument>
+                                        <argument>NaverMapClicker</argument>
+                                        <argument>--main-jar</argument>
+                                        <argument>NaverMapClicker.jar</argument>
+                                        <argument>--main-class</argument>
+                                        <argument>dev.naverclicker.Main</argument>
+                                        <argument>--win-shortcut</argument>
+                                        <argument>--win-menu</argument>
+                                        <argument>--win-dir-chooser</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
