@@ -3,11 +3,15 @@ package dev.naverclicker;
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
+import javafx.scene.control.ListView;
 import javafx.scene.control.Separator;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.HBox;
@@ -21,12 +25,24 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Main extends Application {
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
     private static final DateTimeFormatter TIME_INPUT_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static final String TIME_LABEL_STYLE = """
+            -fx-font-size: 36px;
+            -fx-font-weight: bold;
+            -fx-text-fill: %s;
+            -fx-font-family: Consolas, monospace;
+            """;
+    private static final String COORD_GUIDE_TEXT =
+            "2. 좌표 지정: 클릭할 버튼 위에 마우스를 올리고 Ctrl + F1을 누르세요.";
 
     private final ServerTimeSync timeSync = new ServerTimeSync();
+    private final AtomicBoolean continuousSyncStarted = new AtomicBoolean(false);
     private ClickScheduler scheduler;
 
     private Label timeLabel;
@@ -36,36 +52,109 @@ public class Main extends Application {
     private Label clickResultLabel;
     private Label targetLabel;
     private Button startButton;
+    private Button applyUrlButton;
+    private Button resetCoordButton;
+    private Button undoCoordButton;
     private TextField targetTimeField;
+    private TextField urlField;
+    private TextField intervalField;
+    private ListView<Point> coordListView;
 
-    private volatile int mappedX = -1;
-    private volatile int mappedY = -1;
+    /** 클릭할 좌표를 지정한 순서대로 담는다. FX 스레드에서만 수정한다. */
+    private final ObservableList<Point> coords = FXCollections.observableArrayList();
 
     @Override
     public void start(Stage stage) {
-        Label title = new Label("네이버 지도 예약 클릭");
+        Label title = new Label("서버 시간 예약 클릭");
         title.setStyle("-fx-font-size: 22px; -fx-font-weight: bold; -fx-text-fill: #f5f7fb;");
 
-        Label subtitle = new Label("좌표를 지정하고 목표 시각을 확인한 뒤 예약 시작을 누르면 됩니다.");
+        Label subtitle = new Label("기준 사이트를 정하고 좌표를 지정한 뒤 목표 시각을 확인하고 예약 시작을 누르면 됩니다.");
         subtitle.setWrapText(true);
         subtitle.setStyle("-fx-font-size: 12px; -fx-text-fill: #9ca8ba;");
 
         timeLabel = new Label("동기화 중...");
         timeLabel.setMinWidth(320);
         timeLabel.setAlignment(Pos.CENTER);
-        timeLabel.setStyle("""
-                -fx-font-size: 36px;
-                -fx-font-weight: bold;
-                -fx-text-fill: #20c7b5;
-                -fx-font-family: Consolas, monospace;
-                """);
+        timeLabel.setStyle(TIME_LABEL_STYLE.formatted("#6f7a8c"));
 
-        syncStatusLabel = new Label("1. 서버 시간 동기화 중");
+        urlField = new TextField(timeSync.getTargetUrl());
+        urlField.setPromptText("예: https://map.naver.com");
+        urlField.setStyle(inputStyle());
+
+        applyUrlButton = new Button("적용");
+        applyUrlButton.setStyle("""
+                -fx-background-color: #303849;
+                -fx-text-fill: #f5f7fb;
+                -fx-font-size: 13px;
+                -fx-padding: 10 14 10 14;
+                -fx-background-radius: 6;
+                -fx-cursor: hand;
+                """);
+        applyUrlButton.setOnAction(e -> applyTargetUrl());
+        urlField.setOnAction(e -> applyTargetUrl());
+
+        HBox urlRow = new HBox(10, urlField, applyUrlButton);
+        urlRow.setAlignment(Pos.CENTER);
+        HBox.setHgrow(urlField, Priority.ALWAYS);
+
+        syncStatusLabel = new Label("1. 기준 사이트의 서버 시간 동기화 중");
         syncStatusLabel.setStyle(statusStyle("#c4cad4"));
 
-        coordLabel = new Label("2. 좌표 지정: 클릭할 버튼 위에 마우스를 올리고 Ctrl + F1을 누르세요.");
+        Label urlLabel = new Label("0. 기준 사이트: 시간을 맞출 웹페이지 주소");
+        urlLabel.setStyle(statusStyle("#c4cad4"));
+
+        coordLabel = new Label(COORD_GUIDE_TEXT);
         coordLabel.setWrapText(true);
         coordLabel.setStyle(statusStyle("#ffd166"));
+
+        coordListView = new ListView<>(coords);
+        coordListView.setPrefHeight(96);
+        coordListView.setPlaceholder(new Label("지정된 좌표가 없습니다."));
+        coordListView.setCellFactory(view -> new ListCell<>() {
+            @Override
+            protected void updateItem(Point point, boolean empty) {
+                super.updateItem(point, empty);
+                if (empty || point == null) {
+                    setText(null);
+                } else {
+                    setText("%d. %s".formatted(getIndex() + 1, point));
+                }
+                setStyle("-fx-background-color: transparent; -fx-text-fill: #f5f7fb;");
+            }
+        });
+        coordListView.setStyle("""
+                -fx-background-color: #222936;
+                -fx-control-inner-background: #222936;
+                -fx-font-size: 13px;
+                -fx-font-family: Consolas, monospace;
+                -fx-background-radius: 6;
+                """);
+
+        undoCoordButton = new Button("마지막 취소");
+        undoCoordButton.setStyle(smallButtonStyle());
+        undoCoordButton.setOnAction(e -> undoLastCoord());
+
+        resetCoordButton = new Button("좌표 초기화");
+        resetCoordButton.setStyle(smallButtonStyle());
+        resetCoordButton.setOnAction(e -> resetCoord());
+
+        Label intervalCaption = new Label("클릭 간격");
+        intervalCaption.setStyle(statusStyle("#c4cad4"));
+
+        intervalField = new TextField(String.valueOf(ClickScheduler.DEFAULT_INTERVAL_MILLIS));
+        intervalField.setPrefWidth(70);
+        intervalField.setStyle(inputStyle());
+
+        Label intervalUnit = new Label("ms");
+        intervalUnit.setStyle(statusStyle("#c4cad4"));
+
+        HBox coordButtonRow = new HBox(10,
+                undoCoordButton, resetCoordButton,
+                new Separator(javafx.geometry.Orientation.VERTICAL),
+                intervalCaption, intervalField, intervalUnit);
+        coordButtonRow.setAlignment(Pos.CENTER_LEFT);
+
+        VBox coordBox = new VBox(8, coordLabel, coordListView, coordButtonRow);
 
         targetLabel = new Label("3. 목표 시각: 다음 30분 정각 또는 직접 입력");
         targetLabel.setStyle(statusStyle("#c4cad4"));
@@ -73,15 +162,7 @@ public class Main extends Application {
         targetTimeField = new TextField();
         targetTimeField.setPromptText("예: 15:30:00");
         targetTimeField.setText(formatMillisAsTime(timeSync.getServerTimeMillis()));
-        targetTimeField.setStyle("""
-                -fx-background-color: #222936;
-                -fx-text-fill: #f5f7fb;
-                -fx-prompt-text-fill: #6f7a8c;
-                -fx-font-size: 15px;
-                -fx-font-family: Consolas, monospace;
-                -fx-padding: 10 12 10 12;
-                -fx-background-radius: 6;
-                """);
+        targetTimeField.setStyle(inputStyle());
 
         Button autoTargetButton = new Button("다음 30분 자동 입력");
         autoTargetButton.setStyle("""
@@ -126,8 +207,10 @@ public class Main extends Application {
         startButton.setOnAction(e -> startSchedule());
 
         fillNextHalfHourTarget();
+        updateCoordLabel();
 
-        VBox statusBox = new VBox(10, syncStatusLabel, coordLabel, targetLabel, targetInputRow);
+        VBox statusBox = new VBox(10,
+                urlLabel, urlRow, syncStatusLabel, coordBox, targetLabel, targetInputRow);
         statusBox.setAlignment(Pos.CENTER_LEFT);
 
         HBox actionRow = new HBox(startButton);
@@ -147,11 +230,11 @@ public class Main extends Application {
         root.setAlignment(Pos.CENTER);
         root.setStyle("-fx-background-color: #151922;");
 
-        Scene scene = new Scene(root, 520, 430);
-        stage.setTitle("네이버 지도 예약 클릭");
+        Scene scene = new Scene(root, 560, 720);
+        stage.setTitle("서버 시간 예약 클릭");
         stage.setScene(scene);
-        stage.setMinWidth(520);
-        stage.setMinHeight(430);
+        stage.setMinWidth(560);
+        stage.setMinHeight(720);
         stage.setOnCloseRequest(e -> {
             Platform.exit();
             System.exit(0);
@@ -171,7 +254,6 @@ public class Main extends Application {
                 Platform.runLater(() -> {
                     updateSyncStatus();
                     fillNextHalfHourTarget();
-                    syncStatusLabel.setStyle(statusStyle("#7ee787"));
                     updateStartButtonState();
                 });
                 startContinuousSync();
@@ -186,7 +268,46 @@ public class Main extends Application {
         thread.start();
     }
 
+    private void applyTargetUrl() {
+        String input = urlField.getText();
+        applyUrlButton.setDisable(true);
+        startButton.setDisable(true);
+        syncStatusLabel.setText("기준 사이트 확인 중...");
+        syncStatusLabel.setStyle(statusStyle("#c4cad4"));
+
+        Thread thread = new Thread(() -> {
+            try {
+                timeSync.setTargetUrl(input);
+                timeSync.sync(5);
+                Platform.runLater(() -> {
+                    urlField.setText(timeSync.getTargetUrl());
+                    if (scheduler == null) {
+                        scheduler = new ClickScheduler(timeSync);
+                    }
+                    updateSyncStatus();
+                    fillNextHalfHourTarget();
+                    applyUrlButton.setDisable(false);
+                    updateStartButtonState();
+                });
+                startContinuousSync();
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    syncStatusLabel.setText(e.getMessage());
+                    syncStatusLabel.setStyle(statusStyle("#ff6b6b"));
+                    applyUrlButton.setDisable(false);
+                    updateStartButtonState();
+                });
+            }
+        }, "target-url-apply");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     private void startContinuousSync() {
+        if (!continuousSyncStarted.compareAndSet(false, true)) {
+            return;
+        }
+
         Thread thread = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
@@ -215,40 +336,67 @@ public class Main extends Application {
                 long millis = Math.floorMod(timeSync.getServerTimeMillis(), 1000);
                 timeLabel.setText(String.format("%02d:%02d:%02d.%03d",
                         t.getHour(), t.getMinute(), t.getSecond(), millis));
+
+                // 동기화 전에는 서버 시간이 아니라는 걸 시계 색으로 드러낸다.
+                timeLabel.setStyle(timeSync.isSyncedForTarget()
+                        ? TIME_LABEL_STYLE.formatted("#20c7b5")
+                        : TIME_LABEL_STYLE.formatted("#6f7a8c"));
             }
         }.start();
     }
 
     private void listenHotkey() {
-        Thread thread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    HotkeyCoordMapper mapper = new HotkeyCoordMapper();
-                    mapper.waitForHotkey();
+        try {
+            new HotkeyCoordMapper(this::addCoord).register();
+        } catch (Exception e) {
+            coordLabel.setText("핫키 등록 실패: " + e.getMessage());
+            coordLabel.setStyle(statusStyle("#ff6b6b"));
+        }
+    }
 
-                    mappedX = mapper.getMappedX();
-                    mappedY = mapper.getMappedY();
+    /** 핫키 스레드에서 호출되므로 FX 스레드로 넘겨 목록을 수정한다. */
+    private void addCoord(Point point) {
+        Platform.runLater(() -> {
+            coords.add(point);
+            coordListView.scrollTo(coords.size() - 1);
+            updateCoordLabel();
+            updateStartButtonState();
+        });
+    }
 
-                    Platform.runLater(() -> {
-                        coordLabel.setText("좌표 설정됨: X = %d, Y = %d".formatted(mappedX, mappedY));
-                        coordLabel.setStyle(statusStyle("#7ee787"));
-                        updateStartButtonState();
-                    });
-                } catch (Exception e) {
-                    Platform.runLater(() -> {
-                        coordLabel.setText("핫키 등록 실패: " + e.getMessage());
-                        coordLabel.setStyle(statusStyle("#ff6b6b"));
-                    });
-                    return;
-                }
-            }
-        }, "hotkey-listener");
-        thread.setDaemon(true);
-        thread.start();
+    private void resetCoord() {
+        coords.clear();
+        updateCoordLabel();
+        updateStartButtonState();
+    }
+
+    private void undoLastCoord() {
+        if (!coords.isEmpty()) {
+            coords.remove(coords.size() - 1);
+        }
+        updateCoordLabel();
+        updateStartButtonState();
+    }
+
+    private void updateCoordLabel() {
+        boolean empty = coords.isEmpty();
+        undoCoordButton.setDisable(empty);
+        resetCoordButton.setDisable(empty);
+
+        if (empty) {
+            coordLabel.setText(COORD_GUIDE_TEXT);
+            coordLabel.setStyle(statusStyle("#ffd166"));
+        } else {
+            coordLabel.setText("2. 좌표 %d개 지정됨. 위에서부터 순서대로 클릭합니다. (Ctrl + F1로 추가)"
+                    .formatted(coords.size()));
+            coordLabel.setStyle(statusStyle("#7ee787"));
+        }
     }
 
     private void updateStartButtonState() {
-        startButton.setDisable(scheduler == null || mappedX < 0 || mappedY < 0);
+        // 현재 URL로 동기화되지 않았다면 시계가 내 PC 시간이거나 다른 사이트 기준이므로 막는다.
+        startButton.setDisable(
+                scheduler == null || !timeSync.isSyncedForTarget() || coords.isEmpty());
     }
 
     private void startSchedule() {
@@ -257,16 +405,17 @@ public class Main extends Application {
         clickResultLabel.setText("");
 
         Long targetMillis = readTargetMillis();
-        if (targetMillis == null) {
+        Long intervalMillis = readIntervalMillis();
+        if (targetMillis == null || intervalMillis == null) {
             startButton.setText("예약 시작");
             updateStartButtonState();
             return;
         }
 
         LocalDateTime targetTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(targetMillis), KST);
-        targetLabel.setText("목표 시각: %02d:%02d:%02d.000 | 실제 클릭 +%d ms".formatted(
+        targetLabel.setText("목표 시각: %02d:%02d:%02d.000 | 실제 클릭 +%d ms | 좌표 %d개".formatted(
                 targetTime.getHour(), targetTime.getMinute(), targetTime.getSecond(),
-                scheduler.getSafeDelayMillis()));
+                scheduler.getSafeDelayMillis(), coords.size()));
 
         AnimationTimer countdown = new AnimationTimer() {
             @Override
@@ -284,14 +433,18 @@ public class Main extends Application {
         };
         countdown.start();
 
+        // 예약 시점의 좌표와 간격을 고정한다. 대기 중 목록을 바꿔도 이미 잡힌 예약은 그대로 진행된다.
+        List<Point> clickPoints = new ArrayList<>(coords);
+
         Thread thread = new Thread(() -> {
             try {
-                long delta = scheduler.scheduleClickAt(mappedX, mappedY, targetMillis);
+                long delta = scheduler.scheduleClicksAt(clickPoints, targetMillis, intervalMillis);
                 Platform.runLater(() -> {
                     countdown.stop();
                     countdownLabel.setText("");
                     updateSyncStatus();
-                    clickResultLabel.setText("클릭 완료: 목표 대비 %+d ms".formatted(delta));
+                    clickResultLabel.setText("클릭 %d회 완료: 첫 클릭 목표 대비 %+d ms"
+                            .formatted(clickPoints.size(), delta));
                     clickResultLabel.setStyle(statusStyle("#7ee787"));
                     startButton.setText("예약 시작");
                     updateStartButtonState();
@@ -314,6 +467,29 @@ public class Main extends Application {
         return "-fx-font-size: 13px; -fx-text-fill: %s;".formatted(color);
     }
 
+    private static String smallButtonStyle() {
+        return """
+                -fx-background-color: #303849;
+                -fx-text-fill: #f5f7fb;
+                -fx-font-size: 13px;
+                -fx-padding: 8 12 8 12;
+                -fx-background-radius: 6;
+                -fx-cursor: hand;
+                """;
+    }
+
+    private static String inputStyle() {
+        return """
+                -fx-background-color: #222936;
+                -fx-text-fill: #f5f7fb;
+                -fx-prompt-text-fill: #6f7a8c;
+                -fx-font-size: 15px;
+                -fx-font-family: Consolas, monospace;
+                -fx-padding: 10 12 10 12;
+                -fx-background-radius: 6;
+                """;
+    }
+
     private void fillNextHalfHourTarget() {
         if (scheduler == null) {
             long now = timeSync.getServerTimeMillis();
@@ -324,6 +500,25 @@ public class Main extends Application {
 
         targetTimeField.setText(formatMillisAsTime(scheduler.calcNextTargetMillis()));
         targetLabel.setText("3. 목표 시각: 다음 30분 정각으로 설정됨");
+    }
+
+    /** 클릭 간격을 읽는다. 값이 잘못되면 오류를 표시하고 null을 돌려준다. */
+    private Long readIntervalMillis() {
+        String input = intervalField.getText().trim();
+        try {
+            long interval = Long.parseLong(input);
+            if (interval < ClickScheduler.MIN_INTERVAL_MILLIS
+                    || interval > ClickScheduler.MAX_INTERVAL_MILLIS) {
+                throw new NumberFormatException();
+            }
+            return interval;
+        } catch (NumberFormatException e) {
+            clickResultLabel.setText("클릭 간격은 %d ~ %d ms 사이의 숫자로 입력하세요.".formatted(
+                    ClickScheduler.MIN_INTERVAL_MILLIS, ClickScheduler.MAX_INTERVAL_MILLIS));
+            clickResultLabel.setStyle(statusStyle("#ff6b6b"));
+            intervalField.requestFocus();
+            return null;
+        }
     }
 
     private Long readTargetMillis() {
@@ -357,7 +552,7 @@ public class Main extends Application {
                 scheduler.getSafeDelayMillis(),
                 timeSync.getSyncCount(),
                 updatedAt));
-        syncStatusLabel.setStyle(statusStyle("#7ee787"));
+        syncStatusLabel.setStyle(statusStyle(timeSync.isSyncedForTarget() ? "#7ee787" : "#ffd166"));
     }
 
     public static void main(String[] args) {
