@@ -6,7 +6,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.example</groupId>
-    <artifactId>NaverMapClicker</artifactId>
+    <artifactId>ServerTimeClicker</artifactId>
     <version>1.0-SNAPSHOT</version>
 
     <properties>
@@ -43,7 +43,7 @@
                 <artifactId>javafx-maven-plugin</artifactId>
                 <version>0.0.8</version>
                 <configuration>
-                    <mainClass>dev.naverclicker.Main</mainClass>
+                    <mainClass>dev.servertimeclicker.Main</mainClass>
                 </configuration>
             </plugin>
 
@@ -72,11 +72,11 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>dev.naverclicker.Main</mainClass>
+                            <mainClass>dev.servertimeclicker.Main</mainClass>
                         </manifest>
                     </archive>
                     <outputDirectory>${project.build.directory}/lib</outputDirectory>
-                    <finalName>NaverMapClicker</finalName>
+                    <finalName>ServerTimeClicker</finalName>
                 </configuration>
             </plugin>
         </plugins>
@@ -115,15 +115,15 @@
                                         <argument>--dest</argument>
                                         <argument>${project.build.directory}/dist</argument>
                                         <argument>--name</argument>
-                                        <argument>NaverMapClicker</argument>
+                                        <argument>ServerTimeClicker</argument>
                                         <argument>--app-version</argument>
                                         <argument>1.0</argument>
                                         <argument>--vendor</argument>
-                                        <argument>NaverMapClicker</argument>
+                                        <argument>ServerTimeClicker</argument>
                                         <argument>--main-jar</argument>
-                                        <argument>NaverMapClicker.jar</argument>
+                                        <argument>ServerTimeClicker.jar</argument>
                                         <argument>--main-class</argument>
-                                        <argument>dev.naverclicker.Main</argument>
+                                        <argument>dev.servertimeclicker.Main</argument>
                                         <argument>--win-shortcut</argument>
                                         <argument>--win-menu</argument>
                                         <argument>--win-dir-chooser</argument>

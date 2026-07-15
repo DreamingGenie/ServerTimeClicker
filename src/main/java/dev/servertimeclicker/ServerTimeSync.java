@@ -1,4 +1,4 @@
-package dev.naverclicker;
+package dev.servertimeclicker;
 
 import java.io.IOException;
 import java.io.InputStream;

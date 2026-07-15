@@ -1,4 +1,4 @@
-package dev.naverclicker;
+package dev.servertimeclicker;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;

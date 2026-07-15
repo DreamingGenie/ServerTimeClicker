@@ -1,4 +1,4 @@
-package dev.naverclicker;
+package dev.servertimeclicker;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;

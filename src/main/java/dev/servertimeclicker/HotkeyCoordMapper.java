@@ -1,4 +1,4 @@
-package dev.naverclicker;
+package dev.servertimeclicker;
 
 import com.github.kwhat.jnativehook.GlobalScreen;
 import com.github.kwhat.jnativehook.NativeHookException;
