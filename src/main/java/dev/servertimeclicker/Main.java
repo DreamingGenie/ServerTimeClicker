@@ -9,6 +9,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -96,6 +97,12 @@ public class Main extends Application {
         HBox urlRow = new HBox(10, urlField, applyUrlButton);
         urlRow.setAlignment(Pos.CENTER);
         HBox.setHgrow(urlField, Priority.ALWAYS);
+
+        CheckBox insecureTlsCheck = new CheckBox("인증서 검증 완화 (신뢰할 수 있는 사이트에서만 사용)");
+        insecureTlsCheck.setStyle(statusStyle("#ffd166"));
+        insecureTlsCheck.setSelected(timeSync.isAllowInsecureTls());
+        insecureTlsCheck.selectedProperty().addListener((obs, oldVal, newVal) ->
+                timeSync.setAllowInsecureTls(newVal));
 
         syncStatusLabel = new Label("1. 기준 사이트의 서버 시간 동기화 중");
         syncStatusLabel.setStyle(statusStyle("#c4cad4"));
@@ -210,7 +217,7 @@ public class Main extends Application {
         updateCoordLabel();
 
         VBox statusBox = new VBox(10,
-                urlLabel, urlRow, syncStatusLabel, coordBox, targetLabel, targetInputRow);
+                urlLabel, urlRow, insecureTlsCheck, syncStatusLabel, coordBox, targetLabel, targetInputRow);
         statusBox.setAlignment(Pos.CENTER_LEFT);
 
         HBox actionRow = new HBox(startButton);
@@ -292,7 +299,12 @@ public class Main extends Application {
                 startContinuousSync();
             } catch (Exception e) {
                 Platform.runLater(() -> {
-                    syncStatusLabel.setText(e.getMessage());
+                    String message = e.getMessage();
+                    if (ServerTimeSync.isCertificateChainError(e)) {
+                        message = "인증서 검증에 실패했습니다. 신뢰할 수 있는 사이트라면 "
+                                + "'인증서 검증 완화'를 켠 뒤 다시 시도하세요.";
+                    }
+                    syncStatusLabel.setText(message);
                     syncStatusLabel.setStyle(statusStyle("#ff6b6b"));
                     applyUrlButton.setDisable(false);
                     updateStartButtonState();
@@ -312,6 +324,10 @@ public class Main extends Application {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
                     Thread.sleep(8000);
+                    // 정밀 동기화~클릭 임계 구간에는 주기 동기화가 offset을 덮어쓰지 않게 건너뛴다.
+                    if (timeSync.isBackgroundSyncPaused()) {
+                        continue;
+                    }
                     timeSync.syncBackground();
                     Platform.runLater(this::updateSyncStatus);
                 } catch (InterruptedException e) {

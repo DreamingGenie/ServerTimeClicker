@@ -19,6 +19,9 @@ public class ClickScheduler {
     private static final long RTT_MARGIN_MILLIS = 35;
     private static final long MAX_SAFE_DELAY_MILLIS = 160;
     private static final long FINAL_MOUSE_MOVE_LEAD_MILLIS = 20;
+    // press~release 사이 유지 시간. 대상 앱이 클릭을 확실히 인식하도록 최소한의 지연을 준다
+    // (즉시 press+release하면 초고속 이벤트를 앱이 놓쳐 클릭이 씹히는 경우가 있다).
+    private static final long CLICK_HOLD_MILLIS = 10;
 
     private final ServerTimeSync timeSync;
 
@@ -54,43 +57,52 @@ public class ClickScheduler {
                 points.size(), interval);
 
         waitUntilRough(targetMillis - 5000);
-        timeSync.syncPrecise();
-        long safeDelayMillis = getSafeDelayMillis();
-        long firstClickMillis = targetMillis + safeDelayMillis;
-        System.out.printf("실제 클릭 목표: 예약 기준 +%d ms%n", safeDelayMillis);
+        // 정밀 동기화부터 클릭까지, 주기 동기화가 offset을 덜 정밀한 값으로 덮어쓰지 못하게 막는다.
+        timeSync.setBackgroundSyncPaused(true);
+        try {
+            timeSync.syncPrecise();
+            long safeDelayMillis = getSafeDelayMillis();
+            long firstClickMillis = targetMillis + safeDelayMillis;
+            System.out.printf("실제 클릭 목표: 예약 기준 +%d ms%n", safeDelayMillis);
 
-        Robot robot = new Robot();
-        robot.setAutoDelay(0);
+            Robot robot = new Robot();
+            robot.setAutoDelay(0);
 
-        Point first = points.get(0);
-        robot.mouseMove(first.x(), first.y());
-        waitUntilPrecise(firstClickMillis - FINAL_MOUSE_MOVE_LEAD_MILLIS);
-        robot.mouseMove(first.x(), first.y());
+            Point first = points.get(0);
+            robot.mouseMove(first.x(), first.y());
+            waitUntilPrecise(firstClickMillis - FINAL_MOUSE_MOVE_LEAD_MILLIS);
+            robot.mouseMove(first.x(), first.y());
 
-        long firstDelta = 0;
-        for (int i = 0; i < points.size(); i++) {
-            Point point = points.get(i);
-            long clickMillis = firstClickMillis + i * interval;
+            long firstDelta = 0;
+            for (int i = 0; i < points.size(); i++) {
+                Point point = points.get(i);
+                long clickMillis = firstClickMillis + i * interval;
 
-            if (i > 0) {
-                // 다음 좌표로 미리 이동해 두고 클릭 시각을 기다린다.
-                waitUntilPrecise(clickMillis - FINAL_MOUSE_MOVE_LEAD_MILLIS);
-                robot.mouseMove(point.x(), point.y());
+                if (i > 0) {
+                    // 다음 좌표로 미리 이동해 두고 클릭 시각을 기다린다.
+                    waitUntilPrecise(clickMillis - FINAL_MOUSE_MOVE_LEAD_MILLIS);
+                    robot.mouseMove(point.x(), point.y());
+                }
+
+                waitUntilPrecise(clickMillis);
+                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+                if (CLICK_HOLD_MILLIS > 0) {
+                    Thread.sleep(CLICK_HOLD_MILLIS);
+                }
+                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+
+                long delta = timeSync.getServerTimeMillis() - targetMillis;
+                System.out.printf("클릭 %d/%d 완료 (%d, %d). 목표 대비 %+d ms%n",
+                        i + 1, points.size(), point.x(), point.y(), delta);
+                if (i == 0) {
+                    firstDelta = delta;
+                }
             }
 
-            waitUntilPrecise(clickMillis);
-            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
-            robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
-
-            long delta = timeSync.getServerTimeMillis() - targetMillis;
-            System.out.printf("클릭 %d/%d 완료 (%d, %d). 목표 대비 %+d ms%n",
-                    i + 1, points.size(), point.x(), point.y(), delta);
-            if (i == 0) {
-                firstDelta = delta;
-            }
+            return firstDelta;
+        } finally {
+            timeSync.setBackgroundSyncPaused(false);
         }
-
-        return firstDelta;
     }
 
     public long getSafeDelayMillis() {

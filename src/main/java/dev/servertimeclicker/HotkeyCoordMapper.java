@@ -33,7 +33,9 @@ public class HotkeyCoordMapper implements NativeKeyListener {
         logger.setLevel(Level.OFF);
         logger.setUseParentHandlers(false);
 
-        GlobalScreen.registerNativeHook();
+        if (!GlobalScreen.isNativeHookRegistered()) {
+            GlobalScreen.registerNativeHook();
+        }
         GlobalScreen.addNativeKeyListener(this);
     }
 

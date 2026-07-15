@@ -1,11 +1,19 @@
 package dev.servertimeclicker;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -34,6 +42,12 @@ public class ServerTimeSync {
     private volatile String targetUrl = DEFAULT_URL;
     private volatile boolean headSupported = true;
 
+    // 인증서 체인이 불완전한 사이트를 사용자가 명시적으로 신뢰할 때만 검증을 완화한다.
+    private volatile boolean allowInsecureTls = false;
+    // 정밀 동기화~클릭 사이 임계 구간 동안 주기 동기화가 offset을 덮어쓰지 못하게 막는다.
+    private volatile boolean backgroundSyncPaused = false;
+    private static volatile SSLSocketFactory trustAllSocketFactory;
+
     /** 현재 offsetMillis를 측정한 URL. 아직 한 번도 동기화하지 않았으면 null. */
     private volatile String syncedUrl = null;
 
@@ -45,6 +59,36 @@ public class ServerTimeSync {
 
     public String getTargetUrl() {
         return targetUrl;
+    }
+
+    public boolean isAllowInsecureTls() {
+        return allowInsecureTls;
+    }
+
+    public void setAllowInsecureTls(boolean allowInsecureTls) {
+        this.allowInsecureTls = allowInsecureTls;
+    }
+
+    /**
+     * 정밀 동기화 후 클릭까지의 임계 구간 동안 true로 설정하면, 주기 동기화가
+     * 그 사이 offset을 덜 정밀한 값으로 덮어쓰는 것을 막는다.
+     */
+    public void setBackgroundSyncPaused(boolean paused) {
+        this.backgroundSyncPaused = paused;
+    }
+
+    public boolean isBackgroundSyncPaused() {
+        return backgroundSyncPaused;
+    }
+
+    /** true면 인증서 체인 문제(PKIX 경로 구성 실패)로 인한 실패임을 나타낸다. */
+    public static boolean isCertificateChainError(Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SSLHandshakeException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -233,6 +277,10 @@ public class ServerTimeSync {
         long before = System.currentTimeMillis();
         URL url = URI.create(targetUrl).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        if (allowInsecureTls && conn instanceof HttpsURLConnection httpsConn) {
+            httpsConn.setSSLSocketFactory(getTrustAllSocketFactory());
+            httpsConn.setHostnameVerifier((hostname, session) -> true);
+        }
         conn.setRequestMethod(method);
         conn.setInstanceFollowRedirects(true);
         conn.setConnectTimeout(3000);
@@ -295,6 +343,40 @@ public class ServerTimeSync {
         } catch (DateTimeParseException e) {
             throw new IOException("Date 헤더를 해석할 수 없습니다: " + dateHeader);
         }
+    }
+
+    /**
+     * 인증서 체인이 불완전한 사이트를 사용자가 명시적으로 신뢰하기로 한 경우에만 사용되는
+     * 검증 생략 소켓 팩토리. 이 인스턴스는 개별 연결에만 설정되며 JVM 기본 신뢰 설정에는
+     * 영향을 주지 않는다.
+     */
+    private static SSLSocketFactory getTrustAllSocketFactory() throws Exception {
+        SSLSocketFactory factory = trustAllSocketFactory;
+        if (factory == null) {
+            synchronized (ServerTimeSync.class) {
+                factory = trustAllSocketFactory;
+                if (factory == null) {
+                    TrustManager[] trustAll = new TrustManager[]{
+                            new X509TrustManager() {
+                                public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                                }
+
+                                public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                                }
+
+                                public X509Certificate[] getAcceptedIssuers() {
+                                    return new X509Certificate[0];
+                                }
+                            }
+                    };
+                    SSLContext context = SSLContext.getInstance("TLS");
+                    context.init(null, trustAll, new SecureRandom());
+                    factory = context.getSocketFactory();
+                    trustAllSocketFactory = factory;
+                }
+            }
+        }
+        return factory;
     }
 
     private static long floorMod(long value, long mod) {
