@@ -15,7 +15,6 @@ import java.net.URL;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -193,10 +192,6 @@ public class ServerTimeSync {
 
     public long getServerTimeMillis() {
         return System.currentTimeMillis() + offsetMillis;
-    }
-
-    public LocalDateTime getServerTimeKST() {
-        return LocalDateTime.ofInstant(Instant.ofEpochMilli(getServerTimeMillis()), KST);
     }
 
     public long getLastRoundTripMillis() {

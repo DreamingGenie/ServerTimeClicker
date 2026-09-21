@@ -6,6 +6,7 @@ import com.github.kwhat.jnativehook.keyboard.NativeKeyEvent;
 import com.github.kwhat.jnativehook.keyboard.NativeKeyListener;
 
 import java.awt.MouseInfo;
+import java.awt.PointerInfo;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -53,7 +54,17 @@ public class HotkeyCoordMapper implements NativeKeyListener {
         }
         lastCaptureMillis = now;
 
-        java.awt.Point mouse = MouseInfo.getPointerInfo().getLocation();
+        // 화면 잠김·원격 세션 전환·모니터 분리 직후에는 null이 돌아온다. 그대로
+        // 역참조하면 훅 디스패치 스레드에서 NPE가 나는데, register()가 이 패키지
+        // 로거를 꺼 두어 아무 흔적 없이 사라진다. 사용자 눈에는 핫키가 씹힌 것으로만
+        // 보인다. 다음 입력이 곧바로 먹히도록 반복 방지 시각도 되돌린다.
+        PointerInfo pointer = MouseInfo.getPointerInfo();
+        if (pointer == null) {
+            lastCaptureMillis = 0;
+            return;
+        }
+
+        java.awt.Point mouse = pointer.getLocation();
         onCapture.accept(new Point(mouse.x, mouse.y));
     }
 

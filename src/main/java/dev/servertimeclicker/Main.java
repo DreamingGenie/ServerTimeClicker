@@ -391,8 +391,11 @@ public class Main extends Application {
         new AnimationTimer() {
             @Override
             public void handle(long now) {
-                LocalDateTime t = timeSync.getServerTimeKST();
-                long millis = Math.floorMod(timeSync.getServerTimeMillis(), 1000);
+                // 한 번만 읽는다. 두 번 읽으면 그 사이 초 경계를 넘어 초와 밀리초가
+                // 서로 다른 순간의 값이 되어, 1초 어긋난 시각이 찍힌다.
+                long serverMillis = timeSync.getServerTimeMillis();
+                LocalDateTime t = LocalDateTime.ofInstant(Instant.ofEpochMilli(serverMillis), KST);
+                long millis = Math.floorMod(serverMillis, 1000);
                 timeLabel.setText(String.format("%02d:%02d:%02d.%03d",
                         t.getHour(), t.getMinute(), t.getSecond(), millis));
 
