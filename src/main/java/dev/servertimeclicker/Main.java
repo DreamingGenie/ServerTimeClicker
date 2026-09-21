@@ -38,6 +38,13 @@ public class Main extends Application {
             -fx-text-fill: %s;
             -fx-font-family: Consolas, monospace;
             """;
+    /**
+     * 주기 동기화 간격. 더 짧게 잡아도 정확도는 거의 오르지 않는다. 측정 잡음이 수십 ms인데
+     * 이 간격 동안의 시계 드리프트는 1~2 ms에 그치기 때문이다. 실제 클릭은 목표 5초 전
+     * 정밀 동기화 값을 쓰므로, 이 값은 시계 표시와 정밀 동기화 실패 시의 대비책이다.
+     */
+    private static final long BACKGROUND_SYNC_INTERVAL_MILLIS = 30_000;
+
     private static final String COORD_GUIDE_TEXT =
             "2. 좌표 지정: 클릭할 버튼 위에 마우스를 올리고 Ctrl + F1을 누르세요.";
 
@@ -366,7 +373,7 @@ public class Main extends Application {
         Thread thread = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(8000);
+                    Thread.sleep(BACKGROUND_SYNC_INTERVAL_MILLIS);
                     // 정밀 동기화~클릭 임계 구간에는 주기 동기화가 offset을 덮어쓰지 않게 건너뛴다.
                     if (timeSync.isBackgroundSyncPaused()) {
                         continue;
