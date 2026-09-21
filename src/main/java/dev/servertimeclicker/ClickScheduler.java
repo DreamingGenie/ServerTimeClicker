@@ -8,6 +8,10 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class ClickScheduler {
     public static final long DEFAULT_INTERVAL_MILLIS = 300;
@@ -25,6 +29,8 @@ public class ClickScheduler {
     // press~release 사이 유지 시간. 대상 앱이 클릭을 확실히 인식하도록 최소한의 지연을 준다
     // (즉시 press+release하면 초고속 이벤트를 앱이 놓쳐 클릭이 씹히는 경우가 있다).
     private static final long CLICK_HOLD_MILLIS = 10;
+    /** 목표 5초 전에 시작하는 정밀 동기화를 기다려 줄 상한. 넘기면 직전 offset으로 간다. */
+    private static final long PRECISE_SYNC_DEADLINE_MILLIS = 4000;
 
     private final ServerTimeSync timeSync;
 
@@ -113,13 +119,30 @@ public class ClickScheduler {
      * @return 정밀 동기화에 성공했으면 true
      */
     private boolean syncPreciseOrKeepOffset() throws InterruptedException {
-        try {
+        // 별도 스레드에 맡기고 여기서 기다린다. 소켓 읽기는 인터럽트에 반응하지 않아
+        // 같은 스레드에서 부르면 취소가 연결 타임아웃만큼 늦고, 그사이 마우스가 첫 좌표로
+        // 움직이기까지 한다. 또 목표까지 5초뿐이라 동기화가 길어지면 클릭이 늦으므로,
+        // 기다림에 상한을 두고 넘기면 직전 offset으로 간다.
+        FutureTask<Void> task = new FutureTask<>(() -> {
             timeSync.syncPrecise();
+            return null;
+        });
+        Thread worker = new Thread(task, "precise-sync");
+        worker.setDaemon(true);
+        worker.start();
+
+        try {
+            task.get(PRECISE_SYNC_DEADLINE_MILLIS, TimeUnit.MILLISECONDS);
             return true;
         } catch (InterruptedException e) {
+            task.cancel(true);
             throw e;
-        } catch (Exception e) {
-            System.out.println("정밀 동기화 실패, 직전 offset으로 진행: " + e.getMessage());
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            System.out.println("정밀 동기화 시간 초과, 직전 offset으로 진행");
+            return false;
+        } catch (ExecutionException e) {
+            System.out.println("정밀 동기화 실패, 직전 offset으로 진행: " + e.getCause().getMessage());
             return false;
         }
     }
