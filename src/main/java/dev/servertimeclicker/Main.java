@@ -286,9 +286,13 @@ public class Main extends Application {
     private void initSync() {
         Thread thread = new Thread(() -> {
             try {
+                // 기본 주소도 적용과 같은 경로를 타게 해 리다이렉트를 미리 해소한다.
+                // 그러지 않으면 사용자가 적용을 누르기 전까지 매 측정이 리다이렉트를 탄다.
+                timeSync.setTargetUrl(timeSync.getTargetUrl());
                 timeSync.sync(5);
                 scheduler = new ClickScheduler(timeSync);
                 Platform.runLater(() -> {
+                    urlField.setText(timeSync.getTargetUrl());
                     updateSyncStatus();
                     refreshAutoTargetTime();
                     updateControlState();

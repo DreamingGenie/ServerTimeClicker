@@ -106,15 +106,18 @@ public class ServerTimeSync {
         targetUrl = normalized;
         headSupported = true;
         try {
-            fetchDateHeader();
+            // 리다이렉트로 실제 응답한 주소를 기준으로 승격한다. 그러지 않으면 샘플마다
+            // 리다이렉트를 한 번 더 타서 왕복이 두 번이 되고, 그만큼 샘플 간격이 벌어져
+            // 초 경계를 좁힐 수 있는 폭이 나빠진다. 바뀐 주소는 주소 칸에 그대로 보인다.
+            targetUrl = fetchDateHeader().resolvedUrl();
         } catch (Exception e) {
             targetUrl = previous;
             headSupported = previousHeadSupported;
             throw new IOException(describeFailure(normalized, e), e);
         }
 
-        if (!normalized.equals(previous)) {
-            lastStatus = "%s 동기화 전".formatted(hostOf(normalized));
+        if (!targetUrl.equals(previous)) {
+            lastStatus = "%s 동기화 전".formatted(hostOf(targetUrl));
         }
     }
 
@@ -305,7 +308,7 @@ public class ServerTimeSync {
             }
 
             // 4xx/5xx여도 Date 헤더는 서버가 찍어준 값이므로 그대로 쓴다.
-            return new Sample(parseDateHeader(dateHeader), before, after);
+            return new Sample(parseDateHeader(dateHeader), before, after, conn.getURL().toString());
         } finally {
             // disconnect()를 부르지 않는다. 부르면 소켓이 버려져 다음 샘플이 TLS
             // 핸드셰이크부터 다시 한다. 기본 경로인 HEAD는 본문이 없어 아래 읽기가
@@ -398,7 +401,8 @@ public class ServerTimeSync {
         }
     }
 
-    private record Sample(long serverMillis, long beforeMillis, long afterMillis) {
+    /** resolvedUrl은 리다이렉트를 따라간 끝에 실제로 응답한 주소다. */
+    private record Sample(long serverMillis, long beforeMillis, long afterMillis, String resolvedUrl) {
         long middleMillis() {
             return (beforeMillis + afterMillis) / 2;
         }
