@@ -177,6 +177,12 @@ public class ServerTimeSync {
     }
 
     public synchronized void syncBackground() throws Exception {
+        // 락 안에서 다시 본다. 호출부에서만 검사하면 검사와 동기화 사이에 정밀 동기화가
+        // 끼어들 수 있어, 막으려던 offset 덮어쓰기가 그대로 일어난다.
+        if (backgroundSyncPaused) {
+            return;
+        }
+
         SyncResult result = syncAtSecondBoundary(70, 18, 2200);
         apply(result, "주기 동기화 완료");
     }
@@ -225,8 +231,9 @@ public class ServerTimeSync {
         lastSyncLocalMillis = System.currentTimeMillis();
         syncedUrl = targetUrl;
         syncCount++;
-        lastStatus = "%s (%s) | 오차 %+d ms | RTT %d ms".formatted(
-                label, hostOf(syncedUrl), offsetMillis, lastRoundTripMillis);
+        lastStatus = "%s (%s) | 오차 %+d ms | RTT %d ms%s".formatted(
+                label, hostOf(syncedUrl), offsetMillis, lastRoundTripMillis,
+                result.boundaryFound() ? "" : " | 초 경계 못 잡음(±500ms)");
         System.out.println(lastStatus);
     }
 
@@ -242,11 +249,14 @@ public class ServerTimeSync {
             Sample current = fetchDateHeader();
             samples.add(current);
 
-            if (current.serverMillis() > previous.serverMillis()) {
+            // 정확히 1초 뛴 경우만 초 경계로 인정한다. 샘플이 지연돼 2초 이상 건너뛰면
+            // 실제 경계는 current 직전이지 두 샘플의 중간점이 아니라서, 그대로 쓰면
+            // 최대 1초 가까이 어긋난 offset을 정밀한 값인 양 적용하게 된다.
+            if (current.serverMillis() - previous.serverMillis() == 1000) {
                 long localBoundary = (previous.middleMillis() + current.middleMillis()) / 2;
                 long offset = current.serverMillis() - localBoundary;
                 long rtt = Math.min(previous.roundTripMillis(), current.roundTripMillis());
-                return new SyncResult(offset, rtt);
+                return new SyncResult(offset, rtt, true);
             }
 
             previous = current;
@@ -258,7 +268,7 @@ public class ServerTimeSync {
                 .min(Comparator.comparingLong(Sample::roundTripMillis))
                 .orElseThrow(() -> new IOException("Date 헤더 샘플을 얻지 못했습니다."));
         long offset = best.serverMillis() + 500 - best.middleMillis();
-        return new SyncResult(offset, best.roundTripMillis());
+        return new SyncResult(offset, best.roundTripMillis(), false);
     }
 
     private Sample fetchDateHeader() throws Exception {
@@ -312,11 +322,18 @@ public class ServerTimeSync {
             // 4xx/5xx여도 Date 헤더는 서버가 찍어준 값이므로 그대로 쓴다.
             return new Sample(parseDateHeader(dateHeader), before, after);
         } finally {
+            // disconnect()를 부르지 않는다. 부르면 소켓이 버려져 다음 샘플이 TLS
+            // 핸드셰이크부터 다시 한다. 기본 경로인 HEAD는 본문이 없어 아래 읽기가
+            // 곧바로 EOF에 닿으므로 연결이 재사용 가능한 상태로 돌아간다.
+            // (실측: 요청 최소 소요가 58ms -> 45ms. 평균은 회선 편차에 묻힌다.)
             drainQuietly(conn);
-            conn.disconnect();
         }
     }
 
+    /**
+     * 연결을 정리한다. 본문은 받지 않는 것이 원칙이라 상한을 두고 읽는다. HEAD 응답은
+     * 본문이 없어 재사용으로 이어지고, GET 폴백에서 본문이 남으면 JDK가 소켓을 버린다.
+     */
     private static void drainQuietly(HttpURLConnection conn) {
         try (InputStream in = conn.getErrorStream() != null ? conn.getErrorStream() : conn.getInputStream()) {
             if (in != null) {
@@ -406,6 +423,7 @@ public class ServerTimeSync {
         }
     }
 
-    private record SyncResult(long offsetMillis, long roundTripMillis) {
+    /** boundaryFound가 false면 초 경계를 못 잡고 초 중앙으로 때린 값이라 ±500ms까지 벌어진다. */
+    private record SyncResult(long offsetMillis, long roundTripMillis, boolean boundaryFound) {
     }
 }
