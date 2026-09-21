@@ -29,15 +29,6 @@ public class ClickScheduler {
         this.timeSync = timeSync;
     }
 
-    public long scheduleClick(int x, int y) throws Exception {
-        long targetMillis = calcNextTargetMillis();
-        return scheduleClickAt(x, y, targetMillis);
-    }
-
-    public long scheduleClickAt(int x, int y, long targetMillis) throws Exception {
-        return scheduleClicksAt(List.of(new Point(x, y)), targetMillis, DEFAULT_INTERVAL_MILLIS);
-    }
-
     /**
      * 목표 시각에 첫 좌표를 클릭하고, 이후 좌표를 순서대로 intervalMillis 간격으로 클릭한다.
      * 각 클릭 시각은 직전 클릭이 아니라 목표 시각을 기준으로 계산하므로 오차가 누적되지 않는다.

@@ -125,12 +125,6 @@ public class ServerTimeSync {
         return synced != null && synced.equals(targetUrl);
     }
 
-    /** 현재 오프셋을 측정한 사이트의 호스트. 아직 동기화 전이면 null. */
-    public String getSyncedHost() {
-        String synced = syncedUrl;
-        return synced == null ? null : hostOf(synced);
-    }
-
     private static String hostOf(String url) {
         try {
             return URI.create(url).getHost();
@@ -203,10 +197,6 @@ public class ServerTimeSync {
 
     public LocalDateTime getServerTimeKST() {
         return LocalDateTime.ofInstant(Instant.ofEpochMilli(getServerTimeMillis()), KST);
-    }
-
-    public long getOffsetMillis() {
-        return offsetMillis;
     }
 
     public long getLastRoundTripMillis() {
