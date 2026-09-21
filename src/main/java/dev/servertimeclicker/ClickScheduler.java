@@ -44,11 +44,13 @@ public class ClickScheduler {
      *
      * @return 첫 클릭의 오차와 정밀 동기화 성공 여부
      */
-    public ClickResult scheduleClicksAt(List<Point> points, long targetMillis, long intervalMillis)
-            throws Exception {
+    public ClickResult scheduleClicksAt(List<Point> points, long targetMillis, long intervalMillis,
+            ProgressListener listener) throws Exception {
         if (points == null || points.isEmpty()) {
             throw new IllegalArgumentException("클릭할 좌표가 없습니다.");
         }
+
+        ProgressListener progress = listener != null ? listener : (stage, index) -> { };
 
         long interval = Math.clamp(intervalMillis, MIN_INTERVAL_MILLIS, MAX_INTERVAL_MILLIS);
         LocalDateTime targetTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(targetMillis), KST);
@@ -56,11 +58,14 @@ public class ClickScheduler {
                 targetTime.getHour(), targetTime.getMinute(), targetTime.getSecond(),
                 points.size(), interval);
 
+        progress.onStage(Stage.WAITING, 0);
         waitUntilRough(targetMillis - 5000);
         // 정밀 동기화부터 클릭까지, 주기 동기화가 offset을 덜 정밀한 값으로 덮어쓰지 못하게 막는다.
         timeSync.setBackgroundSyncPaused(true);
         try {
+            progress.onStage(Stage.SYNCING, 0);
             boolean precisionSyncFailed = !syncPreciseOrKeepOffset();
+            progress.onStage(precisionSyncFailed ? Stage.ARMED_WITHOUT_SYNC : Stage.ARMED, 0);
             long safeDelayMillis = getSafeDelayMillis();
             long firstClickMillis = targetMillis + safeDelayMillis;
             System.out.printf("실제 클릭 목표: 예약 기준 +%d ms%n", safeDelayMillis);
@@ -95,6 +100,8 @@ public class ClickScheduler {
                     // 놓지 않으면 마우스 왼쪽 버튼이 눌린 채로 시스템에 남는다.
                     robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
                 }
+
+                progress.onStage(Stage.CLICKED, i + 1);
 
                 long delta = timeSync.getServerTimeMillis() - targetMillis;
                 System.out.printf("클릭 %d/%d 완료 (%d, %d). 목표 대비 %+d ms%n",
@@ -232,6 +239,30 @@ public class ClickScheduler {
         if (Thread.interrupted()) {
             throw new InterruptedException("예약이 취소되었습니다.");
         }
+    }
+
+    /**
+     * 예약이 지금 어느 단계인지. 화면은 카운트다운 숫자만으로는 목표 직전에 무슨 일이
+     * 벌어지는지 알 수 없어, 스케줄러가 단계를 알린다. 문구는 이 enum을 받는 쪽이 정한다.
+     */
+    public enum Stage {
+        /** 목표 5초 전까지 대기 */
+        WAITING,
+        /** 목표 직전 정밀 동기화 중 */
+        SYNCING,
+        /** 정밀 동기화를 마치고 클릭 시각 대기 */
+        ARMED,
+        /** 정밀 동기화에 실패해 직전 기준으로 클릭 시각 대기 */
+        ARMED_WITHOUT_SYNC,
+        /** 클릭 한 번을 마침 */
+        CLICKED
+    }
+
+    /** 단계 보고. 예약 스레드에서 불리므로 받는 쪽이 UI 스레드로 넘겨야 한다. */
+    @FunctionalInterface
+    public interface ProgressListener {
+        /** clickIndex는 CLICKED일 때 1부터, 그 외에는 0. */
+        void onStage(Stage stage, int clickIndex);
     }
 
     /**

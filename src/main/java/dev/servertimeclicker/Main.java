@@ -45,6 +45,9 @@ public class Main extends Application {
      */
     private static final long BACKGROUND_SYNC_INTERVAL_MILLIS = 30_000;
 
+    /** 이만큼 지나도 갱신이 없으면 주기 동기화가 끊긴 것으로 보고 알린다. */
+    private static final long SYNC_OVERDUE_MILLIS = BACKGROUND_SYNC_INTERVAL_MILLIS + 15_000;
+
     private static final String COORD_GUIDE_TEXT =
             "2. 좌표 지정: 클릭할 버튼 위에 마우스를 올리고 Ctrl + F1을 누르세요.";
 
@@ -54,6 +57,8 @@ public class Main extends Application {
 
     private Label timeLabel;
     private Label syncStatusLabel;
+    private Label syncAgeLabel;
+    private Label stageLabel;
     private Label coordLabel;
     private Label countdownLabel;
     private Label clickResultLabel;
@@ -130,6 +135,11 @@ public class Main extends Application {
 
         syncStatusLabel = new Label("1. 기준 사이트의 서버 시간 동기화 중");
         syncStatusLabel.setStyle(statusStyle("#c4cad4"));
+
+        // 주기 동기화가 30초 간격이라 상태 줄은 그 사이 멈춰 있다. 이 숫자만이 앱이
+        // 살아 있는지 실시간으로 보여준다.
+        syncAgeLabel = new Label("아직 동기화 전");
+        syncAgeLabel.setStyle(statusStyle("#6f7a8c"));
 
         Label urlLabel = new Label("0. 기준 사이트: 시간을 맞출 웹페이지 주소");
         urlLabel.setStyle(statusStyle("#c4cad4"));
@@ -210,6 +220,11 @@ public class Main extends Application {
         targetInputRow.setAlignment(Pos.CENTER);
         HBox.setHgrow(targetTimeField, Priority.ALWAYS);
 
+        stageLabel = new Label("");
+        stageLabel.setMinHeight(20);
+        stageLabel.setWrapText(true);
+        stageLabel.setStyle(statusStyle("#9ca8ba"));
+
         countdownLabel = new Label("");
         countdownLabel.setMinHeight(38);
         countdownLabel.setStyle("""
@@ -254,7 +269,8 @@ public class Main extends Application {
         updateControlState();
 
         VBox statusBox = new VBox(10,
-                urlLabel, urlRow, insecureTlsCheck, syncStatusLabel, coordBox, targetLabel, targetInputRow);
+                urlLabel, urlRow, insecureTlsCheck, syncStatusLabel, syncAgeLabel,
+                coordBox, targetLabel, targetInputRow);
         statusBox.setAlignment(Pos.CENTER_LEFT);
 
         HBox actionRow = new HBox(10, startButton, cancelButton);
@@ -267,6 +283,7 @@ public class Main extends Application {
                 timeLabel,
                 statusBox,
                 countdownLabel,
+                stageLabel,
                 clickResultLabel,
                 actionRow
         );
@@ -414,6 +431,8 @@ public class Main extends Application {
                 timeLabel.setStyle(timeSync.isSyncedForTarget()
                         ? TIME_LABEL_STYLE.formatted("#20c7b5")
                         : TIME_LABEL_STYLE.formatted("#6f7a8c"));
+
+                updateSyncAge();
             }
         }.start();
     }
@@ -542,8 +561,11 @@ public class Main extends Application {
 
         Thread thread = new Thread(() -> {
             try {
-                ClickScheduler.ClickResult result =
-                        scheduler.scheduleClicksAt(clickPoints, targetMillis, intervalMillis);
+                ClickScheduler.ClickResult result = scheduler.scheduleClicksAt(
+                        clickPoints, targetMillis, intervalMillis,
+                        // 예약 스레드에서 불린다. 화면 갱신은 FX 스레드로 넘긴다.
+                        (stage, index) -> Platform.runLater(
+                                () -> showStage(stage, index, clickPoints.size())));
                 if (finished.compareAndSet(false, true)) {
                     Platform.runLater(() -> finishReservation(
                             describeClickResult(clickPoints.size(), result),
@@ -608,6 +630,7 @@ public class Main extends Application {
     }
 
     private void clearReservation() {
+        stageLabel.setText("");
         if (reservation != null) {
             reservation.countdown.stop();
             reservation = null;
@@ -724,15 +747,48 @@ public class Main extends Application {
             syncStatusLabel.setText(timeSync.getLastStatus());
             return;
         }
-        String updatedAt = timeSync.getLastSyncLocalMillis() > 0
-                ? formatMillisAsTime(timeSync.getLastSyncLocalMillis())
-                : "--:--:--";
-        syncStatusLabel.setText("%s | 안전 지연 %d ms | 갱신 %d회 %s".formatted(
-                timeSync.getLastStatus(),
-                scheduler.getSafeDelayMillis(),
-                timeSync.getSyncCount(),
-                updatedAt));
+        syncStatusLabel.setText("%s | 안전 지연 %d ms".formatted(
+                timeSync.getLastStatus(), scheduler.getSafeDelayMillis()));
         syncStatusLabel.setStyle(statusStyle(timeSync.isSyncedForTarget() ? "#7ee787" : "#ffd166"));
+    }
+
+    /**
+     * 마지막 동기화로부터 흐른 시간을 매 프레임 갱신한다. 숫자가 올라가는 것 자체가 앱이
+     * 살아 있다는 신호이고, 주기를 한참 넘겨도 계속 오르면 동기화가 끊긴 것이다. 예약 중
+     * 임계 구간에는 주기 동기화를 일부러 멈추므로 그때는 알리지 않는다.
+     */
+    private void updateSyncAge() {
+        long lastSync = timeSync.getLastSyncLocalMillis();
+        if (lastSync <= 0) {
+            syncAgeLabel.setText("아직 동기화 전");
+            syncAgeLabel.setStyle(statusStyle("#6f7a8c"));
+            return;
+        }
+
+        long ageMillis = System.currentTimeMillis() - lastSync;
+        boolean overdue = ageMillis > SYNC_OVERDUE_MILLIS && !timeSync.isBackgroundSyncPaused();
+        syncAgeLabel.setText("갱신 %d초 전 · 누적 %d회%s".formatted(
+                Math.max(0, ageMillis / 1000),
+                timeSync.getSyncCount(),
+                overdue ? "  —  갱신이 끊겼습니다" : ""));
+        syncAgeLabel.setStyle(statusStyle(overdue ? "#ff6b6b" : "#6f7a8c"));
+    }
+
+    /** 예약 스레드가 알려 온 단계를 화면 문구로 옮긴다. */
+    private void showStage(ClickScheduler.Stage stage, int clickIndex, int clickCount) {
+        switch (stage) {
+            case WAITING -> setStageText("목표 시각까지 대기 중", "#9ca8ba");
+            case SYNCING -> setStageText("목표 직전 정밀 동기화 중...", "#ffd166");
+            case ARMED -> setStageText("정밀 동기화 완료. 클릭 시각 대기 중", "#7ee787");
+            case ARMED_WITHOUT_SYNC -> setStageText(
+                    "정밀 동기화 실패 — 직전에 맞춰 둔 기준으로 진행합니다", "#ff6b6b");
+            case CLICKED -> setStageText("클릭 %d/%d".formatted(clickIndex, clickCount), "#7ee787");
+        }
+    }
+
+    private void setStageText(String text, String color) {
+        stageLabel.setText(text);
+        stageLabel.setStyle(statusStyle(color));
     }
 
     /**
