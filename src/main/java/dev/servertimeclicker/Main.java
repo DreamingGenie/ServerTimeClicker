@@ -26,7 +26,6 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -53,9 +52,12 @@ public class Main extends Application {
     private Label clickResultLabel;
     private Label targetLabel;
     private Button startButton;
+    private Button cancelButton;
     private Button applyUrlButton;
+    private Button autoTargetButton;
     private Button resetCoordButton;
     private Button undoCoordButton;
+    private CheckBox insecureTlsCheck;
     private TextField targetTimeField;
     private TextField urlField;
     private TextField intervalField;
@@ -63,6 +65,21 @@ public class Main extends Application {
 
     /** 클릭할 좌표를 지정한 순서대로 담는다. FX 스레드에서만 수정한다. */
     private final ObservableList<Point> coords = FXCollections.observableArrayList();
+
+    /**
+     * 진행 중인 예약. null이면 예약이 없다. FX 스레드에서만 읽고 쓴다.
+     *
+     * <p>예약은 시작 시점의 좌표·간격·목표 시각·기준 사이트를 스냅샷으로 잡는다. 그 뒤로도
+     * 화면 입력이 열려 있으면 목록만 바뀌고 예약은 옛 값으로 진행되어 화면과 실제가 어긋나므로,
+     * 예약이 걸린 동안에는 관련 입력을 모두 잠그고 대신 취소 수단을 준다.
+     */
+    private Reservation reservation;
+
+    /** 기준 사이트 확인이 진행 중인 동안 true. FX 스레드에서만 읽고 쓴다. */
+    private boolean urlApplyInFlight;
+
+    /** 목표 시각 칸에 앱이 마지막으로 채운 값. 칸의 값이 이것과 다르면 사용자가 고친 것이다. */
+    private String autoFilledTargetTime = "";
 
     @Override
     public void start(Stage stage) {
@@ -98,7 +115,7 @@ public class Main extends Application {
         urlRow.setAlignment(Pos.CENTER);
         HBox.setHgrow(urlField, Priority.ALWAYS);
 
-        CheckBox insecureTlsCheck = new CheckBox("인증서 검증 완화 (신뢰할 수 있는 사이트에서만 사용)");
+        insecureTlsCheck = new CheckBox("인증서 검증 완화 (신뢰할 수 있는 사이트에서만 사용)");
         insecureTlsCheck.setStyle(statusStyle("#ffd166"));
         insecureTlsCheck.setSelected(timeSync.isAllowInsecureTls());
         insecureTlsCheck.selectedProperty().addListener((obs, oldVal, newVal) ->
@@ -168,10 +185,10 @@ public class Main extends Application {
 
         targetTimeField = new TextField();
         targetTimeField.setPromptText("예: 15:30:00");
-        targetTimeField.setText(formatMillisAsTime(timeSync.getServerTimeMillis()));
+        setAutoTargetTime(timeSync.getServerTimeMillis());
         targetTimeField.setStyle(inputStyle());
 
-        Button autoTargetButton = new Button("다음 30분 자동 입력");
+        autoTargetButton = new Button("다음 30분 자동 입력");
         autoTargetButton.setStyle("""
                 -fx-background-color: #303849;
                 -fx-text-fill: #f5f7fb;
@@ -213,14 +230,27 @@ public class Main extends Application {
                 """);
         startButton.setOnAction(e -> startSchedule());
 
+        cancelButton = new Button("예약 취소");
+        cancelButton.setStyle("""
+                -fx-background-color: #4a3030;
+                -fx-text-fill: #ffd166;
+                -fx-font-size: 15px;
+                -fx-font-weight: bold;
+                -fx-padding: 12 24 12 24;
+                -fx-background-radius: 6;
+                -fx-cursor: hand;
+                """);
+        cancelButton.setOnAction(e -> cancelReservation());
+
         fillNextHalfHourTarget();
         updateCoordLabel();
+        updateControlState();
 
         VBox statusBox = new VBox(10,
                 urlLabel, urlRow, insecureTlsCheck, syncStatusLabel, coordBox, targetLabel, targetInputRow);
         statusBox.setAlignment(Pos.CENTER_LEFT);
 
-        HBox actionRow = new HBox(startButton);
+        HBox actionRow = new HBox(10, startButton, cancelButton);
         HBox.setHgrow(startButton, Priority.ALWAYS);
 
         VBox root = new VBox(16,
@@ -260,8 +290,8 @@ public class Main extends Application {
                 scheduler = new ClickScheduler(timeSync);
                 Platform.runLater(() -> {
                     updateSyncStatus();
-                    fillNextHalfHourTarget();
-                    updateStartButtonState();
+                    refreshAutoTargetTime();
+                    updateControlState();
                 });
                 startContinuousSync();
             } catch (Exception e) {
@@ -276,9 +306,15 @@ public class Main extends Application {
     }
 
     private void applyTargetUrl() {
+        // 확인이 진행 중이거나 예약이 걸려 있으면 받지 않는다. 적용 버튼이 비활성이어도
+        // 주소창에서 Enter는 그대로 들어오므로 여기서 한 번 더 막는다.
+        if (urlApplyInFlight || reservation != null) {
+            return;
+        }
+
         String input = urlField.getText();
-        applyUrlButton.setDisable(true);
-        startButton.setDisable(true);
+        urlApplyInFlight = true;
+        updateControlState();
         syncStatusLabel.setText("기준 사이트 확인 중...");
         syncStatusLabel.setStyle(statusStyle("#c4cad4"));
 
@@ -292,9 +328,9 @@ public class Main extends Application {
                         scheduler = new ClickScheduler(timeSync);
                     }
                     updateSyncStatus();
-                    fillNextHalfHourTarget();
-                    applyUrlButton.setDisable(false);
-                    updateStartButtonState();
+                    refreshAutoTargetTime();
+                    urlApplyInFlight = false;
+                    updateControlState();
                 });
                 startContinuousSync();
             } catch (Exception e) {
@@ -304,10 +340,13 @@ public class Main extends Application {
                         message = "인증서 검증에 실패했습니다. 신뢰할 수 있는 사이트라면 "
                                 + "'인증서 검증 완화'를 켠 뒤 다시 시도하세요.";
                     }
+                    // 실패한 주소를 칸에 남겨두면, 잠시 뒤 주기 동기화가 상태 줄을 초록으로
+                    // 덮어써서 그 사이트에 맞춰진 것처럼 보인다. 실효 주소로 되돌린다.
+                    urlField.setText(timeSync.getTargetUrl());
                     syncStatusLabel.setText(message);
                     syncStatusLabel.setStyle(statusStyle("#ff6b6b"));
-                    applyUrlButton.setDisable(false);
-                    updateStartButtonState();
+                    urlApplyInFlight = false;
+                    updateControlState();
                 });
             }
         }, "target-url-apply");
@@ -329,7 +368,11 @@ public class Main extends Application {
                         continue;
                     }
                     timeSync.syncBackground();
-                    Platform.runLater(this::updateSyncStatus);
+                    // 상태 줄만 갱신하면 시계는 초록인데 예약 시작은 잠긴 채로 남는다.
+                    Platform.runLater(() -> {
+                        updateSyncStatus();
+                        updateControlState();
+                    });
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (Exception e) {
@@ -373,17 +416,21 @@ public class Main extends Application {
     /** 핫키 스레드에서 호출되므로 FX 스레드로 넘겨 목록을 수정한다. */
     private void addCoord(Point point) {
         Platform.runLater(() -> {
+            // 예약에 잡힌 좌표는 바뀌지 않는다. 여기서 받아주면 목록과 예약 내용이 어긋난다.
+            if (reservation != null) {
+                return;
+            }
             coords.add(point);
             coordListView.scrollTo(coords.size() - 1);
             updateCoordLabel();
-            updateStartButtonState();
+            updateControlState();
         });
     }
 
     private void resetCoord() {
         coords.clear();
         updateCoordLabel();
-        updateStartButtonState();
+        updateControlState();
     }
 
     private void undoLastCoord() {
@@ -391,15 +438,19 @@ public class Main extends Application {
             coords.remove(coords.size() - 1);
         }
         updateCoordLabel();
-        updateStartButtonState();
+        updateControlState();
     }
 
     private void updateCoordLabel() {
-        boolean empty = coords.isEmpty();
-        undoCoordButton.setDisable(empty);
-        resetCoordButton.setDisable(empty);
+        // 예약 중에는 목록이 아니라 예약에 잡힌 개수를 말해야 화면이 실제와 맞는다.
+        if (reservation != null) {
+            coordLabel.setText("2. 예약에 좌표 %d개가 고정되었습니다. 바꾸려면 예약을 취소하세요."
+                    .formatted(reservation.coordCount));
+            coordLabel.setStyle(statusStyle("#c4cad4"));
+            return;
+        }
 
-        if (empty) {
+        if (coords.isEmpty()) {
             coordLabel.setText(COORD_GUIDE_TEXT);
             coordLabel.setStyle(statusStyle("#ffd166"));
         } else {
@@ -409,24 +460,45 @@ public class Main extends Application {
         }
     }
 
-    private void updateStartButtonState() {
+    /**
+     * 화면 입력 상태를 한곳에서 정한다. 예약이 걸린 동안에는 예약이 스냅샷으로 잡은
+     * 값(좌표·간격·목표 시각·기준 사이트)을 건드릴 수 없도록 전부 잠근다.
+     */
+    private void updateControlState() {
+        boolean armed = reservation != null;
+        boolean busy = armed || urlApplyInFlight;
+
         // 현재 URL로 동기화되지 않았다면 시계가 내 PC 시간이거나 다른 사이트 기준이므로 막는다.
         startButton.setDisable(
-                scheduler == null || !timeSync.isSyncedForTarget() || coords.isEmpty());
+                busy || scheduler == null || !timeSync.isSyncedForTarget() || coords.isEmpty());
+        cancelButton.setDisable(!armed);
+
+        undoCoordButton.setDisable(armed || coords.isEmpty());
+        resetCoordButton.setDisable(armed || coords.isEmpty());
+        intervalField.setDisable(armed);
+        targetTimeField.setDisable(armed);
+        autoTargetButton.setDisable(armed);
+        urlField.setDisable(armed);
+        applyUrlButton.setDisable(busy);
+        insecureTlsCheck.setDisable(armed);
     }
 
     private void startSchedule() {
-        startButton.setDisable(true);
-        startButton.setText("예약 대기 중");
-        clickResultLabel.setText("");
-
-        Long targetMillis = readTargetMillis();
-        Long intervalMillis = readIntervalMillis();
-        if (targetMillis == null || intervalMillis == null) {
-            startButton.setText("예약 시작");
-            updateStartButtonState();
+        if (reservation != null) {
             return;
         }
+
+        // 오류 문구는 읽는 쪽이 남긴다. 둘을 한꺼번에 읽으면 뒤엣것이 앞엣것의 문구를
+        // 덮어써 오류 하나가 화면에서 사라지므로, 걸리는 즉시 멈춘다.
+        Long targetMillis = readTargetMillis();
+        if (targetMillis == null) {
+            return;
+        }
+        Long intervalMillis = readIntervalMillis();
+        if (intervalMillis == null) {
+            return;
+        }
+        clickResultLabel.setText("");
 
         LocalDateTime targetTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(targetMillis), KST);
         targetLabel.setText("목표 시각: %02d:%02d:%02d.000 | 실제 클릭 +%d ms | 좌표 %d개".formatted(
@@ -449,34 +521,78 @@ public class Main extends Application {
         };
         countdown.start();
 
-        // 예약 시점의 좌표와 간격을 고정한다. 대기 중 목록을 바꿔도 이미 잡힌 예약은 그대로 진행된다.
-        List<Point> clickPoints = new ArrayList<>(coords);
+        // 예약 시점의 좌표와 간격을 고정한다. 이 뒤로 화면 입력이 잠기므로 목록과 예약이 어긋나지 않는다.
+        List<Point> clickPoints = List.copyOf(coords);
+        // 완료와 취소 중 먼저 도착한 쪽만 화면을 정리하게 하는 관문.
+        AtomicBoolean finished = new AtomicBoolean(false);
 
         Thread thread = new Thread(() -> {
             try {
                 long delta = scheduler.scheduleClicksAt(clickPoints, targetMillis, intervalMillis);
-                Platform.runLater(() -> {
-                    countdown.stop();
-                    countdownLabel.setText("");
-                    updateSyncStatus();
-                    clickResultLabel.setText("클릭 %d회 완료: 첫 클릭 목표 대비 %+d ms"
-                            .formatted(clickPoints.size(), delta));
-                    clickResultLabel.setStyle(statusStyle("#7ee787"));
-                    startButton.setText("예약 시작");
-                    updateStartButtonState();
-                });
+                if (finished.compareAndSet(false, true)) {
+                    Platform.runLater(() -> finishReservation(
+                            "클릭 %d회 완료: 첫 클릭 목표 대비 %+d ms"
+                                    .formatted(clickPoints.size(), delta),
+                            "#7ee787"));
+                }
+            } catch (InterruptedException e) {
+                // 취소로 중단됐다. 화면은 cancelReservation()이 이미 정리했다.
+                Thread.currentThread().interrupt();
             } catch (Exception e) {
-                Platform.runLater(() -> {
-                    countdown.stop();
-                    clickResultLabel.setText("오류: " + e.getMessage());
-                    clickResultLabel.setStyle(statusStyle("#ff6b6b"));
-                    startButton.setText("예약 시작");
-                    updateStartButtonState();
-                });
+                if (finished.compareAndSet(false, true)) {
+                    Platform.runLater(() -> finishReservation("오류: " + e.getMessage(), "#ff6b6b"));
+                }
             }
         }, "click-scheduler");
         thread.setDaemon(true);
+
+        reservation = new Reservation(thread, countdown, targetMillis, clickPoints.size(), finished);
+        startButton.setText("예약 대기 중");
+        updateCoordLabel();
+        updateControlState();
         thread.start();
+    }
+
+    /**
+     * 예약을 취소한다. finished를 먼저 잡은 쪽만 화면을 정리하므로, 클릭이 이미 끝난 뒤에
+     * 눌린 취소는 아무 일도 하지 않고 완료 콜백에 자리를 넘긴다.
+     */
+    private void cancelReservation() {
+        Reservation current = reservation;
+        if (current == null || !current.finished.compareAndSet(false, true)) {
+            return;
+        }
+
+        // 목표 시각을 넘겼다면 이미 클릭이 나갔을 수 있다. 취소했다고만 말하면 거짓이 된다.
+        boolean beforeFirstClick = timeSync.getServerTimeMillis() < current.targetMillis;
+        current.thread.interrupt();
+        clearReservation();
+        clickResultLabel.setText(beforeFirstClick
+                ? "예약을 취소했습니다. 클릭하지 않았습니다."
+                : "예약을 취소했습니다. 이미 나간 클릭은 되돌릴 수 없습니다.");
+        clickResultLabel.setStyle(statusStyle("#ffd166"));
+    }
+
+    /** 예약 스레드가 끝났을 때 화면을 되돌린다. */
+    private void finishReservation(String message, String color) {
+        clearReservation();
+        // 방금 지나간 시각이 칸에 남으면 곧바로 다시 누를 때 10초 규칙에 걸려 조용히
+        // 내일로 잡힌다. 취소와 달리 여기서는 목표가 이미 소진됐으므로 새로 잡아준다.
+        setAutoTargetTime(scheduler.calcNextTargetMillis());
+        updateSyncStatus();
+        clickResultLabel.setText(message);
+        clickResultLabel.setStyle(statusStyle(color));
+    }
+
+    private void clearReservation() {
+        if (reservation != null) {
+            reservation.countdown.stop();
+            reservation = null;
+        }
+        countdownLabel.setText("");
+        startButton.setText("예약 시작");
+        updateCoordLabel();
+        updateControlState();
     }
 
     private static String statusStyle(String color) {
@@ -510,12 +626,31 @@ public class Main extends Application {
         if (scheduler == null) {
             long now = timeSync.getServerTimeMillis();
             long next = ((now / 1000 / 1800) + 1) * 1800 * 1000;
-            targetTimeField.setText(formatMillisAsTime(next));
+            setAutoTargetTime(next);
             return;
         }
 
-        targetTimeField.setText(formatMillisAsTime(scheduler.calcNextTargetMillis()));
+        setAutoTargetTime(scheduler.calcNextTargetMillis());
         targetLabel.setText("3. 목표 시각: 다음 30분 정각으로 설정됨");
+    }
+
+    /**
+     * 목표 시각 칸을 앱이 채우고 그 값을 기억해 둔다. 뒤에 칸의 값이 이것과 다르면
+     * 사용자가 직접 고친 것이다.
+     */
+    private void setAutoTargetTime(long millis) {
+        autoFilledTargetTime = formatMillisAsTime(millis);
+        targetTimeField.setText(autoFilledTargetTime);
+    }
+
+    /**
+     * 동기화로 시계 기준이 바뀌었을 때 목표 시각을 다시 잡는다. 사용자가 직접 넣은 값은
+     * 건드리지 않는다. 덮어쓰면 입력한 시각이 말없이 사라진다.
+     */
+    private void refreshAutoTargetTime() {
+        if (targetTimeField.getText().equals(autoFilledTargetTime)) {
+            fillNextHalfHourTarget();
+        }
     }
 
     /** 클릭 간격을 읽는다. 값이 잘못되면 오류를 표시하고 null을 돌려준다. */
@@ -569,6 +704,26 @@ public class Main extends Application {
                 timeSync.getSyncCount(),
                 updatedAt));
         syncStatusLabel.setStyle(statusStyle(timeSync.isSyncedForTarget() ? "#7ee787" : "#ffd166"));
+    }
+
+    /**
+     * 진행 중인 예약 한 건. FX 스레드에서 만들고 지우며, finished만 예약 스레드와 나눠 쓴다.
+     */
+    private static final class Reservation {
+        final Thread thread;
+        final AnimationTimer countdown;
+        final long targetMillis;
+        final int coordCount;
+        final AtomicBoolean finished;
+
+        Reservation(Thread thread, AnimationTimer countdown, long targetMillis, int coordCount,
+                    AtomicBoolean finished) {
+            this.thread = thread;
+            this.countdown = countdown;
+            this.targetMillis = targetMillis;
+            this.coordCount = coordCount;
+            this.finished = finished;
+        }
     }
 
     public static void main(String[] args) {

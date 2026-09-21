@@ -86,10 +86,15 @@ public class ClickScheduler {
 
                 waitUntilPrecise(clickMillis);
                 robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
-                if (CLICK_HOLD_MILLIS > 0) {
-                    Thread.sleep(CLICK_HOLD_MILLIS);
+                try {
+                    if (CLICK_HOLD_MILLIS > 0) {
+                        Thread.sleep(CLICK_HOLD_MILLIS);
+                    }
+                } finally {
+                    // hold 중 취소로 인터럽트가 걸려도 버튼을 놓고 나간다.
+                    // 놓지 않으면 마우스 왼쪽 버튼이 눌린 채로 시스템에 남는다.
+                    robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
                 }
-                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
 
                 long delta = timeSync.getServerTimeMillis() - targetMillis;
                 System.out.printf("클릭 %d/%d 완료 (%d, %d). 목표 대비 %+d ms%n",
@@ -141,6 +146,7 @@ public class ClickScheduler {
 
     private void waitUntilRough(long targetMillis) throws InterruptedException {
         while (true) {
+            throwIfCancelled();
             long remaining = targetMillis - timeSync.getServerTimeMillis();
             if (remaining <= 0) {
                 return;
@@ -151,6 +157,7 @@ public class ClickScheduler {
 
     private void waitUntilPrecise(long targetMillis) throws InterruptedException {
         while (true) {
+            throwIfCancelled();
             long remaining = targetMillis - timeSync.getServerTimeMillis();
             if (remaining <= 0) {
                 return;
@@ -163,6 +170,16 @@ public class ClickScheduler {
             } else {
                 Thread.onSpinWait();
             }
+        }
+    }
+
+    /**
+     * 취소되었으면 중단한다. 대기가 sleep으로만 이뤄지지 않고(yield·spin, 그리고 이미 시각이
+     * 지나 곧바로 반환하는 경우) 인터럽트가 그냥 지나칠 수 있어, 클릭마다 직접 확인한다.
+     */
+    private static void throwIfCancelled() throws InterruptedException {
+        if (Thread.interrupted()) {
+            throw new InterruptedException("예약이 취소되었습니다.");
         }
     }
 }
