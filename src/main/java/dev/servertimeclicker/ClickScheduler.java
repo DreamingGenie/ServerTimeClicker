@@ -14,6 +14,9 @@ public class ClickScheduler {
     public static final long MIN_INTERVAL_MILLIS = 20;
     public static final long MAX_INTERVAL_MILLIS = 10000;
 
+    /** 목표까지 최소한 이만큼은 남아 있어야 한다. 목표 5초 전 정밀 동기화를 위한 여유. */
+    public static final long MIN_LEAD_MILLIS = 10_000;
+
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
     private static final long MIN_SAFE_DELAY_MILLIS = 45;
     private static final long RTT_MARGIN_MILLIS = 35;
@@ -33,9 +36,9 @@ public class ClickScheduler {
      * 목표 시각에 첫 좌표를 클릭하고, 이후 좌표를 순서대로 intervalMillis 간격으로 클릭한다.
      * 각 클릭 시각은 직전 클릭이 아니라 목표 시각을 기준으로 계산하므로 오차가 누적되지 않는다.
      *
-     * @return 첫 클릭의 목표 대비 오차(ms)
+     * @return 첫 클릭의 오차와 정밀 동기화 성공 여부
      */
-    public long scheduleClicksAt(List<Point> points, long targetMillis, long intervalMillis)
+    public ClickResult scheduleClicksAt(List<Point> points, long targetMillis, long intervalMillis)
             throws Exception {
         if (points == null || points.isEmpty()) {
             throw new IllegalArgumentException("클릭할 좌표가 없습니다.");
@@ -51,7 +54,7 @@ public class ClickScheduler {
         // 정밀 동기화부터 클릭까지, 주기 동기화가 offset을 덜 정밀한 값으로 덮어쓰지 못하게 막는다.
         timeSync.setBackgroundSyncPaused(true);
         try {
-            timeSync.syncPrecise();
+            boolean precisionSyncFailed = !syncPreciseOrKeepOffset();
             long safeDelayMillis = getSafeDelayMillis();
             long firstClickMillis = targetMillis + safeDelayMillis;
             System.out.printf("실제 클릭 목표: 예약 기준 +%d ms%n", safeDelayMillis);
@@ -95,9 +98,29 @@ public class ClickScheduler {
                 }
             }
 
-            return firstDelta;
+            return new ClickResult(firstDelta, precisionSyncFailed);
         } finally {
             timeSync.setBackgroundSyncPaused(false);
+        }
+    }
+
+    /**
+     * 목표 직전 정밀 동기화. 실패해도 예약을 포기하지 않는다. 직전까지 쓰던 offset은
+     * 늦어도 8초 전에 잰 값이라 그대로 클릭해도 되는데, 여기서 예외를 올리면 한 번뿐인
+     * 예약이 복구 가능한 네트워크 오류 하나로 통째로 날아간다. 하필 이 순간이 대상
+     * 사이트가 가장 붐비는 때라 실패 확률도 평소보다 높다. 취소는 그대로 올린다.
+     *
+     * @return 정밀 동기화에 성공했으면 true
+     */
+    private boolean syncPreciseOrKeepOffset() throws InterruptedException {
+        try {
+            timeSync.syncPrecise();
+            return true;
+        } catch (InterruptedException e) {
+            throw e;
+        } catch (Exception e) {
+            System.out.println("정밀 동기화 실패, 직전 offset으로 진행: " + e.getMessage());
+            return false;
         }
     }
 
@@ -117,22 +140,36 @@ public class ClickScheduler {
         long secondsInHour = (now / 1000) % 3600;
         long secondsTo30 = 1800 - (secondsInHour % 1800);
 
-        if (secondsTo30 <= 10) {
+        if (secondsTo30 * 1000 <= MIN_LEAD_MILLIS) {
             secondsTo30 += 1800;
         }
 
         return (now / 1000 + secondsTo30) * 1000L;
     }
 
+    /**
+     * 입력한 시각을 절대 시각으로 바꾼다. 이미 지난 시각은 다음 날로 본다(HH:mm:ss만
+     * 받으므로 그 해석뿐이다).
+     *
+     * @throws IllegalArgumentException 목표가 지금부터 MIN_LEAD_MILLIS 안쪽일 때.
+     *         조용히 다음 날로 미루면 사용자가 노린 순간을 통째로 놓친다.
+     */
     public long calcTargetMillis(LocalTime targetTime) {
-        ZonedDateTime now = Instant.ofEpochMilli(timeSync.getServerTimeMillis()).atZone(KST);
+        long nowMillis = timeSync.getServerTimeMillis();
+        ZonedDateTime now = Instant.ofEpochMilli(nowMillis).atZone(KST);
         ZonedDateTime target = now.toLocalDate().atTime(targetTime).atZone(KST);
 
-        if (!target.isAfter(now.plusSeconds(10))) {
+        if (target.isBefore(now)) {
             target = target.plusDays(1);
         }
 
-        return target.toInstant().toEpochMilli();
+        long targetMillis = target.toInstant().toEpochMilli();
+        if (targetMillis - nowMillis < MIN_LEAD_MILLIS) {
+            throw new IllegalArgumentException(
+                    "목표 시각까지 %d초도 남지 않았습니다. 목표 5초 전 정밀 동기화가 필요하니 더 뒤로 잡으세요."
+                            .formatted(MIN_LEAD_MILLIS / 1000));
+        }
+        return targetMillis;
     }
 
     private void waitUntilRough(long targetMillis) throws InterruptedException {
@@ -172,5 +209,12 @@ public class ClickScheduler {
         if (Thread.interrupted()) {
             throw new InterruptedException("예약이 취소되었습니다.");
         }
+    }
+
+    /**
+     * 클릭 결과. 오차만으로는 "정밀 동기화를 못 한 채 이전 기준으로 눌렀다"는 사실을
+     * 화면에 전할 수 없어 함께 돌려준다.
+     */
+    public record ClickResult(long firstDeltaMillis, boolean precisionSyncFailed) {
     }
 }

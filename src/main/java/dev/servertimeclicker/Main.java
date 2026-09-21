@@ -528,12 +528,12 @@ public class Main extends Application {
 
         Thread thread = new Thread(() -> {
             try {
-                long delta = scheduler.scheduleClicksAt(clickPoints, targetMillis, intervalMillis);
+                ClickScheduler.ClickResult result =
+                        scheduler.scheduleClicksAt(clickPoints, targetMillis, intervalMillis);
                 if (finished.compareAndSet(false, true)) {
                     Platform.runLater(() -> finishReservation(
-                            "클릭 %d회 완료: 첫 클릭 목표 대비 %+d ms"
-                                    .formatted(clickPoints.size(), delta),
-                            "#7ee787"));
+                            describeClickResult(clickPoints.size(), result),
+                            result.precisionSyncFailed() ? "#ffd166" : "#7ee787"));
                 }
             } catch (InterruptedException e) {
                 // 취소로 중단됐다. 화면은 cancelReservation()이 이미 정리했다.
@@ -571,6 +571,15 @@ public class Main extends Application {
                 ? "예약을 취소했습니다. 클릭하지 않았습니다."
                 : "예약을 취소했습니다. 이미 나간 클릭은 되돌릴 수 없습니다.");
         clickResultLabel.setStyle(statusStyle("#ffd166"));
+    }
+
+    private static String describeClickResult(int clickCount, ClickScheduler.ClickResult result) {
+        String message = "클릭 %d회 완료: 첫 클릭 목표 대비 %+d ms"
+                .formatted(clickCount, result.firstDeltaMillis());
+        if (result.precisionSyncFailed()) {
+            message += " | 목표 직전 정밀 동기화에 실패해 이전 기준으로 클릭했습니다";
+        }
+        return message;
     }
 
     /** 예약 스레드가 끝났을 때 화면을 되돌린다. */
@@ -679,6 +688,12 @@ public class Main extends Application {
             return scheduler.calcTargetMillis(targetTime);
         } catch (DateTimeParseException e) {
             clickResultLabel.setText("목표 시각을 HH:mm:ss 형식으로 입력하세요. 예: 15:30:00");
+            clickResultLabel.setStyle(statusStyle("#ff6b6b"));
+            targetTimeField.requestFocus();
+            return null;
+        } catch (IllegalArgumentException e) {
+            // 너무 가까운 목표는 다음 날로 밀지 않고 거부한다. 밀면 노린 순간을 놓친다.
+            clickResultLabel.setText(e.getMessage());
             clickResultLabel.setStyle(statusStyle("#ff6b6b"));
             targetTimeField.requestFocus();
             return null;
