@@ -23,6 +23,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -40,10 +41,13 @@ public class ServerTimeSync {
      * 경계를 놓친 회차는 500 ms까지 어긋난다. 실측 14회로 비교했을 때 최신값 하나는
      * 표준편차 15.7 ms, 최근 5회 중앙값은 8.4 ms였다.
      */
-    private static final int OFFSET_HISTORY_SIZE = 5;
+    private static final int MEDIAN_SAMPLE_COUNT = 5;
 
-    /** 이보다 오래된 측정은 버린다. 서버 시계가 실제로 옮겨 가면 따라가야 한다. */
-    private static final long OFFSET_HISTORY_MAX_AGE_MILLIS = 3 * 60 * 1000;
+    /** 중앙값에 이보다 오래된 측정은 넣지 않는다. 서버 시계가 실제로 옮겨 가면 따라가야 한다. */
+    private static final long MEDIAN_MAX_AGE_MILLIS = 3 * 60 * 1000;
+
+    /** 이력 보관 개수. 중앙값은 이 중 최근 것만 쓰고, 나머지는 추이를 보여주는 데 쓴다. */
+    private static final int HISTORY_SIZE = 30;
 
     // 일부 사이트(CDN/WAF)는 기본 Java UA를 봇으로 보고 차단하므로 브라우저 UA로 요청한다.
     private static final String USER_AGENT =
@@ -68,8 +72,15 @@ public class ServerTimeSync {
      */
     private final Deque<OffsetSample> offsetHistory = new ArrayDeque<>();
 
+    /**
+     * 화면이 읽는 이력 스냅샷. 화면은 FX 스레드에서 읽는데 위 목록은 인스턴스 락이
+     * 지키고 동기화가 그 락을 최대 2.5초 쥐고 있어, 그대로 열어 주면 화면이 멈춘다.
+     */
+    private volatile List<Measurement> recentMeasurements = List.of();
+
     /** 이력의 중앙값. 시계 계산에 실제로 쓰이는 값이다. */
     private volatile long offsetMillis = 0;
+
     private volatile long lastRoundTripMillis = -1;
     private volatile String lastStatus = "동기화 전";
     private volatile long lastSyncLocalMillis = 0;
@@ -237,31 +248,36 @@ public class ServerTimeSync {
     private void apply(SyncResult result, String label) {
         long now = System.currentTimeMillis();
         record(result, now);
-        int used = 0;
         offsetMillis = medianOffset();
-        for (OffsetSample sample : offsetHistory) {
-            if (sample.boundaryFound()) {
-                used++;
-            }
-        }
 
         lastRoundTripMillis = result.roundTripMillis();
         lastSyncLocalMillis = now;
         syncedUrl = targetUrl;
         syncCount++;
-        lastStatus = "%s (%s) | 오차 %+d ms (%d회 중앙값) | RTT %d ms%s".formatted(
-                label, hostOf(syncedUrl), offsetMillis,
-                used > 0 ? used : offsetHistory.size(), lastRoundTripMillis,
+        // 측정 개수와 폭은 바로 아래 추이 그래프가 보여준다. 여기 또 적으면 줄이 넘쳐
+        // 뒷부분이 잘린다.
+        lastStatus = "%s (%s) | 오차 %+d ms | RTT %d ms%s".formatted(
+                label, hostOf(syncedUrl), offsetMillis, lastRoundTripMillis,
                 result.boundaryFound() ? "" : " | 이번 회차 초 경계 못 잡음(±500ms)");
         System.out.printf("%s | 이번 측정 %+d ms%n", lastStatus, result.offsetMillis());
     }
 
     private void record(SyncResult result, long now) {
         offsetHistory.addLast(new OffsetSample(result.offsetMillis(), now, result.boundaryFound()));
-        offsetHistory.removeIf(s -> now - s.measuredAtMillis() > OFFSET_HISTORY_MAX_AGE_MILLIS);
-        while (offsetHistory.size() > OFFSET_HISTORY_SIZE) {
+        while (offsetHistory.size() > HISTORY_SIZE) {
             offsetHistory.removeFirst();
         }
+
+        List<Measurement> snapshot = new ArrayList<>(offsetHistory.size());
+        for (OffsetSample sample : offsetHistory) {
+            snapshot.add(new Measurement(sample.offsetMillis(), sample.boundaryFound()));
+        }
+        recentMeasurements = List.copyOf(snapshot);
+    }
+
+    /** 화면 표시용 최근 측정 이력. 오래된 것이 앞, 최신이 뒤. 락을 잡지 않는다. */
+    public List<Measurement> getRecentMeasurements() {
+        return recentMeasurements;
     }
 
     /**
@@ -270,13 +286,29 @@ public class ServerTimeSync {
      * 값과 섞일 자격이 없기 때문이다.
      */
     private long medianOffset() {
-        List<Long> values = offsetHistory.stream()
+        long now = System.currentTimeMillis();
+        List<OffsetSample> recent = new ArrayList<>(MEDIAN_SAMPLE_COUNT);
+        Iterator<OffsetSample> newestFirst = offsetHistory.descendingIterator();
+        while (newestFirst.hasNext() && recent.size() < MEDIAN_SAMPLE_COUNT) {
+            OffsetSample sample = newestFirst.next();
+            if (now - sample.measuredAtMillis() > MEDIAN_MAX_AGE_MILLIS) {
+                // 이력은 시간순이라 이보다 앞엣것은 모두 더 오래됐다.
+                break;
+            }
+            recent.add(sample);
+        }
+        if (recent.isEmpty() && !offsetHistory.isEmpty()) {
+            // 전부 오래됐어도 0을 돌려주는 것보다는 가장 최근 값이 낫다.
+            recent.add(offsetHistory.peekLast());
+        }
+
+        List<Long> values = recent.stream()
                 .filter(OffsetSample::boundaryFound)
                 .map(OffsetSample::offsetMillis)
                 .sorted()
                 .toList();
         if (values.isEmpty()) {
-            values = offsetHistory.stream()
+            values = recent.stream()
                     .map(OffsetSample::offsetMillis)
                     .sorted()
                     .toList();
@@ -467,6 +499,10 @@ public class ServerTimeSync {
 
     /** 한 번의 동기화가 내놓은 오차와, 그것이 초 경계를 잡아 낸 값인지. */
     private record OffsetSample(long offsetMillis, long measuredAtMillis, boolean boundaryFound) {
+    }
+
+    /** 화면에 추이를 그리기 위한 측정 한 건. */
+    public record Measurement(long offsetMillis, boolean boundaryFound) {
     }
 
     /** resolvedUrl은 리다이렉트를 따라간 끝에 실제로 응답한 주소다. */
