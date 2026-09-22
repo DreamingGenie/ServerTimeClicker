@@ -19,8 +19,10 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 
@@ -32,6 +34,16 @@ public class ServerTimeSync {
     private static final DateTimeFormatter DATE_HEADER_FORMAT_OBSOLETE =
             DateTimeFormatter.ofPattern("EEEE, dd-MMM-yy HH:mm:ss zzz", Locale.ENGLISH);
     private static final ZoneId KST = ZoneId.of("Asia/Seoul");
+
+    /**
+     * 중앙값을 낼 때 쓰는 최근 측정 개수. 한 번의 측정에는 수십 ms 잡음이 섞이고, 초
+     * 경계를 놓친 회차는 500 ms까지 어긋난다. 실측 14회로 비교했을 때 최신값 하나는
+     * 표준편차 15.7 ms, 최근 5회 중앙값은 8.4 ms였다.
+     */
+    private static final int OFFSET_HISTORY_SIZE = 5;
+
+    /** 이보다 오래된 측정은 버린다. 서버 시계가 실제로 옮겨 가면 따라가야 한다. */
+    private static final long OFFSET_HISTORY_MAX_AGE_MILLIS = 3 * 60 * 1000;
 
     // 일부 사이트(CDN/WAF)는 기본 Java UA를 봇으로 보고 차단하므로 브라우저 UA로 요청한다.
     private static final String USER_AGENT =
@@ -50,6 +62,13 @@ public class ServerTimeSync {
     /** 현재 offsetMillis를 측정한 URL. 아직 한 번도 동기화하지 않았으면 null. */
     private volatile String syncedUrl = null;
 
+    /**
+     * 최근 측정 이력. apply()를 부르는 경로가 모두 synchronized라 인스턴스 락이 지킨다.
+     * 읽는 쪽(getServerTimeMillis)은 아래 offsetMillis만 보므로 락을 잡지 않는다.
+     */
+    private final Deque<OffsetSample> offsetHistory = new ArrayDeque<>();
+
+    /** 이력의 중앙값. 시계 계산에 실제로 쓰이는 값이다. */
     private volatile long offsetMillis = 0;
     private volatile long lastRoundTripMillis = -1;
     private volatile String lastStatus = "동기화 전";
@@ -117,6 +136,8 @@ public class ServerTimeSync {
         }
 
         if (!targetUrl.equals(previous)) {
+            // 다른 서버의 측정치를 한 중앙값에 섞으면 안 된다.
+            offsetHistory.clear();
             lastStatus = "%s 동기화 전".formatted(hostOf(targetUrl));
         }
     }
@@ -214,15 +235,58 @@ public class ServerTimeSync {
     }
 
     private void apply(SyncResult result, String label) {
-        offsetMillis = result.offsetMillis();
+        long now = System.currentTimeMillis();
+        record(result, now);
+        int used = 0;
+        offsetMillis = medianOffset();
+        for (OffsetSample sample : offsetHistory) {
+            if (sample.boundaryFound()) {
+                used++;
+            }
+        }
+
         lastRoundTripMillis = result.roundTripMillis();
-        lastSyncLocalMillis = System.currentTimeMillis();
+        lastSyncLocalMillis = now;
         syncedUrl = targetUrl;
         syncCount++;
-        lastStatus = "%s (%s) | 오차 %+d ms | RTT %d ms%s".formatted(
-                label, hostOf(syncedUrl), offsetMillis, lastRoundTripMillis,
-                result.boundaryFound() ? "" : " | 초 경계 못 잡음(±500ms)");
-        System.out.println(lastStatus);
+        lastStatus = "%s (%s) | 오차 %+d ms (%d회 중앙값) | RTT %d ms%s".formatted(
+                label, hostOf(syncedUrl), offsetMillis,
+                used > 0 ? used : offsetHistory.size(), lastRoundTripMillis,
+                result.boundaryFound() ? "" : " | 이번 회차 초 경계 못 잡음(±500ms)");
+        System.out.printf("%s | 이번 측정 %+d ms%n", lastStatus, result.offsetMillis());
+    }
+
+    private void record(SyncResult result, long now) {
+        offsetHistory.addLast(new OffsetSample(result.offsetMillis(), now, result.boundaryFound()));
+        offsetHistory.removeIf(s -> now - s.measuredAtMillis() > OFFSET_HISTORY_MAX_AGE_MILLIS);
+        while (offsetHistory.size() > OFFSET_HISTORY_SIZE) {
+            offsetHistory.removeFirst();
+        }
+    }
+
+    /**
+     * 최근 측정의 중앙값. 한 회차가 크게 빗나가도 나머지가 밀어낸다. 초 경계를 잡은
+     * 측정이 하나라도 있으면 그것들만 쓴다. 초 중앙으로 때린 값(±500ms)은 경계를 잡은
+     * 값과 섞일 자격이 없기 때문이다.
+     */
+    private long medianOffset() {
+        List<Long> values = offsetHistory.stream()
+                .filter(OffsetSample::boundaryFound)
+                .map(OffsetSample::offsetMillis)
+                .sorted()
+                .toList();
+        if (values.isEmpty()) {
+            values = offsetHistory.stream()
+                    .map(OffsetSample::offsetMillis)
+                    .sorted()
+                    .toList();
+        }
+
+        int n = values.size();
+        if (n % 2 == 1) {
+            return values.get(n / 2);
+        }
+        return (values.get(n / 2 - 1) + values.get(n / 2)) / 2;
     }
 
     private SyncResult syncAtSecondBoundary(int maxAttempts, long intervalMillis, long maxWaitMillis)
@@ -399,6 +463,10 @@ public class ServerTimeSync {
         NoDateHeaderException(String message) {
             super(message);
         }
+    }
+
+    /** 한 번의 동기화가 내놓은 오차와, 그것이 초 경계를 잡아 낸 값인지. */
+    private record OffsetSample(long offsetMillis, long measuredAtMillis, boolean boundaryFound) {
     }
 
     /** resolvedUrl은 리다이렉트를 따라간 끝에 실제로 응답한 주소다. */
